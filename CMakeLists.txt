@@ -14,7 +14,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # GitHub repository ("owner/name") whose Releases NVLOW checks for updates.
-set(NVLOW_GITHUB_REPO "Ahmaaadm/NVLOW" CACHE STRING "GitHub repo used for auto-updates")
+set(NVLOW_GITHUB_REPO "Ahmaaadm/NVLOW-")
 
 add_executable(NVLOW WIN32
     src/main.cpp
