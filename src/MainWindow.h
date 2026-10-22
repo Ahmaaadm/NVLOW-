@@ -110,6 +110,15 @@ private:
     void OpenPath(const std::wstring& path, bool select);
     void MarkExistingOutputs();
 
+    // Row action links (Open / Copy path / Folder) in the "Compressed file" column
+    static LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref);
+    bool HasOutput(const VideoItem& item) const;
+    void GetActionRects(HDC dc, int row, RECT out[]) const;
+    bool HitTestAction(POINT pt, int& row, int& action) const;
+    void RunRowAction(int row, int action);
+    void SetHover(int row, int action);
+    void CopyToClipboard(const std::wstring& text);
+
     // Settings
     void LoadSettingsIntoControls();
     void ReadSettingsFromControls();
@@ -144,6 +153,9 @@ private:
     HFONT m_fontBold = nullptr;
     HFONT m_fontTitle = nullptr;
     HFONT m_fontSubtitle = nullptr;
+    HFONT m_fontLinkHot = nullptr;  // underlined, for hovered row links
+    int m_hoverRow = -1;
+    int m_hoverAction = -1;
 
     // Controls
     HWND m_lblGame = nullptr, m_cmbGame = nullptr, m_btnCheckAll = nullptr, m_btnRemove = nullptr;

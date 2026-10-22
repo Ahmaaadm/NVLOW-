@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 
 project(NVLOW
-    VERSION 1.1.0
+    VERSION 1.2.0
     DESCRIPTION "Shrink NVIDIA recordings without losing quality"
     LANGUAGES CXX RC)
 

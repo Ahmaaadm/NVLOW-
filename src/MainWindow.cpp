@@ -38,10 +38,16 @@ enum ControlId : int {
     IDC_GAME = 1001, IDC_CHECKALL, IDC_REMOVE, IDC_ADD, IDC_LIBRARY, IDC_REFRESH, IDC_LIST,
     IDC_CODEC, IDC_QUALITY, IDC_RES, IDC_AUDIO, IDC_PERF, IDC_OUTPUT, IDC_BROWSE, IDC_NEXTTO, IDC_RECYCLE,
     IDC_START, IDC_CANCEL, IDC_UPD_GO, IDC_UPD_NOTES, IDC_UPD_SKIP,
-    IDM_OPEN = 2001, IDM_REVEAL, IDM_OPEN_OUTPUT, IDM_REVEAL_OUTPUT, IDM_CHECK_ALL, IDM_UNCHECK_ALL, IDM_REMOVE,
+    IDM_OPEN = 2001, IDM_REVEAL, IDM_OPEN_OUTPUT, IDM_REVEAL_OUTPUT, IDM_COPY_OUTPUT, IDM_CHECK_ALL, IDM_UNCHECK_ALL,
+    IDM_REMOVE,
 };
 
-enum Column { ColName, ColGame, ColDate, ColDuration, ColVideo, ColBitrate, ColSize, ColResult, ColCount };
+enum Column { ColName, ColGame, ColDate, ColDuration, ColVideo, ColBitrate, ColSize, ColResult, ColOutput, ColCount };
+
+// Clickable links drawn in the "Compressed file" column of finished rows.
+enum RowAction { ActOpen, ActCopy, ActFolder, ActCount };
+const wchar_t* kActionLabels[ActCount] = {L"▶ Open", L"Copy path", L"Folder"};
+constexpr COLORREF kLinkText = RGB(0, 102, 204);
 
 struct ColumnDef {
     const wchar_t* title;
@@ -49,9 +55,9 @@ struct ColumnDef {
     int format;
 };
 const ColumnDef kColumns[ColCount] = {
-    {L"File", 290, LVCFMT_LEFT},     {L"Game", 130, LVCFMT_LEFT},     {L"Recorded", 125, LVCFMT_LEFT},
-    {L"Length", 58, LVCFMT_RIGHT},   {L"Video", 175, LVCFMT_LEFT},    {L"Bitrate", 80, LVCFMT_RIGHT},
-    {L"Size", 80, LVCFMT_RIGHT},     {L"Result", 220, LVCFMT_LEFT},
+    {L"File", 250, LVCFMT_LEFT},     {L"Game", 115, LVCFMT_LEFT},     {L"Recorded", 118, LVCFMT_LEFT},
+    {L"Length", 54, LVCFMT_RIGHT},   {L"Video", 160, LVCFMT_LEFT},    {L"Bitrate", 76, LVCFMT_RIGHT},
+    {L"Size", 74, LVCFMT_RIGHT},     {L"Result", 170, LVCFMT_LEFT},   {L"Compressed file", 168, LVCFMT_LEFT},
 };
 
 const wchar_t* kCodecLabels[] = {
@@ -124,7 +130,7 @@ MainWindow::MainWindow() = default;
 
 MainWindow::~MainWindow() {
     if (m_taskbar) m_taskbar->Release();
-    for (HFONT f : {m_font, m_fontBold, m_fontTitle, m_fontSubtitle})
+    for (HFONT f : {m_font, m_fontBold, m_fontTitle, m_fontSubtitle, m_fontLinkHot})
         if (f) DeleteObject(f);
 }
 
@@ -429,7 +435,7 @@ HWND MainWindow::Ctl(const wchar_t* cls, const wchar_t* text, DWORD style, int i
 }
 
 void MainWindow::CreateFonts() {
-    for (HFONT* f : {&m_font, &m_fontBold, &m_fontTitle, &m_fontSubtitle}) {
+    for (HFONT* f : {&m_font, &m_fontBold, &m_fontTitle, &m_fontSubtitle, &m_fontLinkHot}) {
         if (*f) DeleteObject(*f);
         *f = nullptr;
     }
@@ -441,6 +447,8 @@ void MainWindow::CreateFonts() {
     m_fontBold = make(9, FW_SEMIBOLD, L"Segoe UI");
     m_fontTitle = make(20, FW_BOLD, L"Segoe UI");
     m_fontSubtitle = make(10, FW_NORMAL, L"Segoe UI");
+    m_fontLinkHot = CreateFontW(-MulDiv(9, m_dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE, DEFAULT_CHARSET,
+                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 }
 
 void MainWindow::ApplyFonts() {
@@ -472,6 +480,7 @@ void MainWindow::CreateControls() {
 
     m_list = Ctl(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_TABSTOP | WS_BORDER, IDC_LIST);
     SetWindowTheme(m_list, L"Explorer", nullptr);
+    SetWindowSubclass(m_list, ListSubclassProc, 1, (DWORD_PTR)this);
     ListView_SetExtendedListViewStyle(m_list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER |
                                                   LVS_EX_HEADERDRAGDROP | LVS_EX_LABELTIP);
     for (int c = 0; c < ColCount; ++c) {
@@ -627,7 +636,7 @@ void MainWindow::Layout() {
     for (int c = 0; c < ColCount; ++c)
         if (c != ColResult) used += ListView_GetColumnWidth(m_list, c);
     int scroll = (GetWindowLongW(m_list, GWL_STYLE) & WS_VSCROLL) ? 0 : GetSystemMetricsForDpi(SM_CXVSCROLL, m_dpi);
-    ListView_SetColumnWidth(m_list, ColResult, std::max(S(180), (int)lr.right - used - scroll));
+    ListView_SetColumnWidth(m_list, ColResult, std::max(S(140), (int)lr.right - used - scroll));
 }
 
 void MainWindow::Paint() {
@@ -829,7 +838,30 @@ LRESULT MainWindow::OnNotify(NMHDR* hdr) {
         case NM_CUSTOMDRAW: {
             auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(hdr);
             if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-            if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
+            if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+            if (cd->nmcd.dwDrawStage == CDDS_ITEMPOSTPAINT) {
+                // Draw the row's action links on top of the (themed) row background.
+                const int row = (int)cd->nmcd.dwItemSpec;
+                auto it = m_items.find((int)cd->nmcd.lItemlParam);
+                if (it == m_items.end() || !HasOutput(it->second)) return CDRF_DODEFAULT;
+                RECT links[ActCount];
+                GetActionRects(cd->nmcd.hdc, row, links);
+                RECT cell;
+                ListView_GetSubItemRect(m_list, row, ColOutput, LVIR_BOUNDS, &cell);
+                // The list paints rows into an offset back buffer, so clip in logical coordinates.
+                const int saved = SaveDC(cd->nmcd.hdc);
+                IntersectClipRect(cd->nmcd.hdc, cell.left, cell.top, cell.right, cell.bottom);
+                SetBkMode(cd->nmcd.hdc, TRANSPARENT);
+                for (int a = 0; a < ActCount; ++a) {
+                    const bool hot = row == m_hoverRow && a == m_hoverAction;
+                    HGDIOBJ old = SelectObject(cd->nmcd.hdc, hot ? m_fontLinkHot : m_font);
+                    SetTextColor(cd->nmcd.hdc, kLinkText);
+                    DrawTextW(cd->nmcd.hdc, kActionLabels[a], -1, &links[a], DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                    SelectObject(cd->nmcd.hdc, old);
+                }
+                RestoreDC(cd->nmcd.hdc, saved);
+                return CDRF_DODEFAULT;
+            }
             if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
                 cd->clrText = GetSysColor(COLOR_WINDOWTEXT);
                 if (cd->iSubItem == ColResult) {
@@ -880,6 +912,8 @@ void MainWindow::OnContextMenu(int x, int y) {
                 L"Play compressed video");
     AppendMenuW(menu, sel.size() == 1 && hasOutput ? MF_STRING : MF_STRING | MF_GRAYED, IDM_REVEAL_OUTPUT,
                 L"Show compressed video in folder");
+    AppendMenuW(menu, sel.size() == 1 && hasOutput ? MF_STRING : MF_STRING | MF_GRAYED, IDM_COPY_OUTPUT,
+                L"Copy compressed video path");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_CHECK_ALL, L"Select all");
     AppendMenuW(menu, MF_STRING, IDM_UNCHECK_ALL, L"Select none");
@@ -894,10 +928,142 @@ void MainWindow::OnContextMenu(int x, int y) {
         case IDM_REVEAL: OpenPath(first->path, true); break;
         case IDM_OPEN_OUTPUT: OpenPath(first->outputPath, false); break;
         case IDM_REVEAL_OUTPUT: OpenPath(first->outputPath, true); break;
+        case IDM_COPY_OUTPUT: CopyToClipboard(first->outputPath); break;
         case IDM_CHECK_ALL: SetAllChecked(true); break;
         case IDM_UNCHECK_ALL: SetAllChecked(false); break;
         case IDM_REMOVE: RemoveSelected(); break;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row actions ("Compressed file" column links)
+// ---------------------------------------------------------------------------------------------
+
+bool MainWindow::HasOutput(const VideoItem& item) const {
+    return item.state == ItemState::Done && !item.outputPath.empty();
+}
+
+void MainWindow::GetActionRects(HDC dc, int row, RECT out[]) const {
+    RECT cell{};
+    ListView_GetSubItemRect(m_list, row, ColOutput, LVIR_BOUNDS, &cell);
+    HGDIOBJ old = SelectObject(dc, m_font);
+    int x = cell.left + S(6);
+    for (int a = 0; a < ActCount; ++a) {
+        // Measure with DrawText (not GetTextExtentPoint32) so font fallback for "▶" is included.
+        RECT m{0, 0, 0, 0};
+        DrawTextW(dc, kActionLabels[a], -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        out[a] = RECT{x, cell.top, x + m.right, cell.bottom};
+        x += m.right + S(14);
+    }
+    SelectObject(dc, old);
+}
+
+bool MainWindow::HitTestAction(POINT pt, int& row, int& action) const {
+    LVHITTESTINFO hit{};
+    hit.pt = pt;
+    if (ListView_SubItemHitTest(m_list, &hit) < 0 || hit.iSubItem != ColOutput || hit.iItem < 0) return false;
+    LVITEMW lv{};
+    lv.mask = LVIF_PARAM;
+    lv.iItem = hit.iItem;
+    ListView_GetItem(m_list, &lv);
+    auto it = m_items.find((int)lv.lParam);
+    if (it == m_items.end() || !HasOutput(it->second)) return false;
+
+    HDC dc = GetDC(m_list);
+    RECT links[ActCount];
+    GetActionRects(dc, hit.iItem, links);
+    ReleaseDC(m_list, dc);
+    for (int a = 0; a < ActCount; ++a) {
+        RECT r = links[a];
+        InflateRect(&r, S(3), 0);  // a little forgiving around the text
+        if (PtInRect(&r, pt)) {
+            row = hit.iItem;
+            action = a;
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::RunRowAction(int row, int action) {
+    LVITEMW lv{};
+    lv.mask = LVIF_PARAM;
+    lv.iItem = row;
+    ListView_GetItem(m_list, &lv);
+    auto it = m_items.find((int)lv.lParam);
+    if (it == m_items.end()) return;
+    const std::wstring& out = it->second.outputPath;
+    if (!FileExists(out)) {
+        SetStatus(L"The compressed file was moved or deleted: " + out);
+        return;
+    }
+    switch (action) {
+        case ActOpen: OpenPath(out, false); break;
+        case ActCopy: CopyToClipboard(out); break;
+        case ActFolder: OpenPath(out, true); break;
+    }
+}
+
+void MainWindow::CopyToClipboard(const std::wstring& text) {
+    if (text.empty() || !OpenClipboard(m_hwnd)) return;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        memcpy(GlobalLock(mem), text.c_str(), bytes);
+        GlobalUnlock(mem);
+        if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+    }
+    CloseClipboard();
+    SetStatus(L"Copied to clipboard:  " + text);
+}
+
+void MainWindow::SetHover(int row, int action) {
+    if (row == m_hoverRow && action == m_hoverAction) return;
+    const int oldRow = m_hoverRow;
+    m_hoverRow = row;
+    m_hoverAction = action;
+    if (oldRow >= 0) ListView_RedrawItems(m_list, oldRow, oldRow);
+    if (row >= 0 && row != oldRow) ListView_RedrawItems(m_list, row, row);
+}
+
+// The list is subclassed so the links get a hand cursor, hover underline and clicks
+// that don't also select/tick the row.
+LRESULT CALLBACK MainWindow::ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    auto* self = reinterpret_cast<MainWindow*>(ref);
+    switch (msg) {
+        case WM_MOUSEMOVE: {
+            int row = -1, action = -1;
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            self->HitTestAction(pt, row, action);
+            self->SetHover(row, action);
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tme);
+            break;
+        }
+        case WM_MOUSELEAVE:
+            self->SetHover(-1, -1);
+            break;
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT && self->m_hoverAction >= 0) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK: {
+            int row = -1, action = -1;
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (self->HitTestAction(pt, row, action)) {
+                if (msg == WM_LBUTTONDOWN) self->RunRowAction(row, action);
+                return 0;
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, ListSubclassProc, 1);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
 void MainWindow::OnDropFiles(HDROP drop) {
@@ -1029,6 +1195,7 @@ std::wstring MainWindow::CurrentGameFilter() const {
 void MainWindow::RebuildList() {
     m_populating = true;
     SendMessageW(m_list, WM_SETREDRAW, FALSE, 0);
+    m_hoverRow = m_hoverAction = -1;
     ListView_DeleteAllItems(m_list);
 
     const std::wstring filter = CurrentGameFilter();
@@ -1064,10 +1231,22 @@ int CALLBACK MainWindow::CompareItems(LPARAM a, LPARAM b, LPARAM selfPtr) {
         case ColGame: r = StrCmpLogicalW(A.game.c_str(), B.game.c_str()); break;
         case ColDate: r = CompareFileTime(&A.modified, &B.modified); break;
         case ColDuration: r = cmp(A.info.duration, B.info.duration); break;
-        case ColVideo: r = cmp((long long)A.info.width * A.info.height, (long long)B.info.width * B.info.height); break;
+        case ColVideo:  // resolution, then frame rate, then codec
+            r = cmp((long long)A.info.width * A.info.height, (long long)B.info.width * B.info.height);
+            if (r == 0) r = cmp(A.info.fps, B.info.fps);
+            if (r == 0) r = StrCmpLogicalW(A.info.videoCodec.c_str(), B.info.videoCodec.c_str());
+            break;
         case ColBitrate: r = cmp(A.info.bitrate, B.info.bitrate); break;
         case ColSize: r = cmp(A.size, B.size); break;
-        case ColResult: r = cmp(StateRank(A.state), StateRank(B.state)); break;
+        case ColResult:  // outcome, then how much space was saved
+            r = cmp(StateRank(A.state), StateRank(B.state));
+            if (r == 0 && A.state == ItemState::Done && A.size && B.size)
+                r = cmp((double)B.outSize / B.size, (double)A.outSize / A.size);
+            break;
+        case ColOutput:  // compressed copies first, then by compressed size
+            r = cmp(self->HasOutput(B), self->HasOutput(A));
+            if (r == 0) r = cmp(A.outSize, B.outSize);
+            break;
     }
     if (r == 0) r = CompareFileTime(&B.modified, &A.modified);
     return self->m_sortAscending ? r : -r;
@@ -1127,6 +1306,7 @@ std::wstring MainWindow::ColumnText(const VideoItem& item, int column) const {
                 case ItemState::Ready: return item.result.empty() ? L"Ready" : item.result;
                 default: return item.result;
             }
+        case ColOutput: return {};  // links are drawn in custom draw
     }
     return {};
 }
@@ -1211,7 +1391,7 @@ void MainWindow::MarkExistingOutputs() {
             item.state = ItemState::Done;
             item.outputPath = out;
             item.outSize = size;
-            item.result = L"✓ Already compressed · " + FormatSize(size) + L"  (" + Percent(item.size, size) + L")";
+            item.result = L"✓ " + FormatSize(size) + L"  (" + Percent(item.size, size) + L")";
         } else if (item.state == ItemState::Done) {
             item.state = ItemState::Ready;
             item.result.clear();
@@ -1806,7 +1986,7 @@ void MainWindow::OnJobDone(int id, const JobOutcome& o) {
                 op.wFunc = FO_DELETE;
                 op.pFrom = from.c_str();
                 op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
-                if (SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted) item.result += L" · original recycled";
+                if (SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted) item.result += L" · original in Recycle Bin";
             }
         }
         RefreshRow(id);

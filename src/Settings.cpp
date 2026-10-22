@@ -44,7 +44,7 @@ AppSettings LoadSettings() {
     s.encode.performance = (Performance)ReadInt(ini, L"Performance", (int)Performance::Medium, 0, (int)Performance::Count - 1);
     s.gameFilter = ReadStr(ini, L"GameFilter");
     s.skippedVersion = ReadStr(ini, L"SkippedVersion");
-    s.sortColumn = ReadInt(ini, L"SortColumn", 2, 0, 7);
+    s.sortColumn = ReadInt(ini, L"SortColumn", 2, 0, 8);
     s.sortAscending = ReadInt(ini, L"SortAscending", 0, 0, 1) != 0;
     s.libraryRoot = ReadStr(ini, L"LibraryRoot");
     s.outputDir = ReadStr(ini, L"OutputDir");
