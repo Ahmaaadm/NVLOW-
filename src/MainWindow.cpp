@@ -55,8 +55,8 @@ struct ColumnDef {
     int format;
 };
 const ColumnDef kColumns[ColCount] = {
-    {L"File", 250, LVCFMT_LEFT},     {L"Game", 115, LVCFMT_LEFT},     {L"Recorded", 118, LVCFMT_LEFT},
-    {L"Length", 54, LVCFMT_RIGHT},   {L"Video", 160, LVCFMT_LEFT},    {L"Bitrate", 76, LVCFMT_RIGHT},
+    {L"File", 300, LVCFMT_LEFT},     {L"Game", 115, LVCFMT_LEFT},     {L"Recorded", 112, LVCFMT_LEFT},
+    {L"Length", 54, LVCFMT_RIGHT},   {L"Video", 150, LVCFMT_LEFT},    {L"Bitrate", 76, LVCFMT_RIGHT},
     {L"Size", 74, LVCFMT_RIGHT},     {L"Result", 170, LVCFMT_LEFT},   {L"Compressed file", 168, LVCFMT_LEFT},
 };
 
@@ -130,6 +130,8 @@ MainWindow::MainWindow() = default;
 
 MainWindow::~MainWindow() {
     if (m_taskbar) m_taskbar->Release();
+    for (auto& [id, item] : m_items)
+        if (item.thumb) DeleteObject(item.thumb);
     for (HFONT f : {m_font, m_fontBold, m_fontTitle, m_fontSubtitle, m_fontLinkHot})
         if (f) DeleteObject(f);
 }
@@ -213,6 +215,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             m_dpi = HIWORD(wp);
             CreateFonts();
             ApplyFonts();
+            CreateThumbnailList();  // thumbnails at the new size
             for (int c = 0; c < ColCount; ++c)
                 ListView_SetColumnWidth(m_list, c, MulDiv(ListView_GetColumnWidth(m_list, c), m_dpi, oldDpi));
             auto* r = reinterpret_cast<RECT*>(lp);
@@ -271,13 +274,28 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_APP_PROBED: {
-            std::unique_ptr<MediaInfo> info(reinterpret_cast<MediaInfo*>(lp));
+            std::unique_ptr<ProbeResult> res(reinterpret_cast<ProbeResult*>(lp));
             auto it = m_items.find((int)wp);
             if (it != m_items.end()) {
-                it->second.info = *info;
-                if (it->second.state == ItemState::Analyzing) {
-                    it->second.state = ItemState::Ready;
-                    if (!info->ok) it->second.result = L"Could not read video info";
+                VideoItem& item = it->second;
+                item.info = res->info;
+                if (item.state == ItemState::Analyzing) {
+                    item.state = ItemState::Ready;
+                    if (!res->info.ok) item.result = L"Could not read video info";
+                }
+                if (res->thumb) {
+                    if (item.thumb) DeleteObject(item.thumb);
+                    item.thumb = res->thumb;
+                    res->thumb = nullptr;  // the item owns it now
+                    item.image = AddThumbnail(item.thumb);
+                    int row = FindRow(item.id);
+                    if (row >= 0) {
+                        LVITEMW lv{};
+                        lv.mask = LVIF_IMAGE;
+                        lv.iItem = row;
+                        lv.iImage = item.image;
+                        ListView_SetItem(m_list, &lv);
+                    }
                 }
                 RefreshRow(it->first);
             }
@@ -379,8 +397,8 @@ void MainWindow::OnCreate() {
     }
 
     HWND hwnd = m_hwnd;
-    m_probe.Start([hwnd](int id, const MediaInfo& info) {
-        PostOwned(hwnd, WM_APP_PROBED, (WPARAM)id, new MediaInfo(info));
+    m_probe.Start([hwnd](int id, const MediaInfo& info, HBITMAP thumb) {
+        PostOwned(hwnd, WM_APP_PROBED, (WPARAM)id, new ProbeResult(info, thumb));
     });
 
     m_libraryRoot = m_settings.libraryRoot.empty() || !DirExists(m_settings.libraryRoot) ? DetectNvidiaFolder()
@@ -481,6 +499,7 @@ void MainWindow::CreateControls() {
     m_list = Ctl(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_TABSTOP | WS_BORDER, IDC_LIST);
     SetWindowTheme(m_list, L"Explorer", nullptr);
     SetWindowSubclass(m_list, ListSubclassProc, 1, (DWORD_PTR)this);
+    CreateThumbnailList();
     ListView_SetExtendedListViewStyle(m_list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER |
                                                   LVS_EX_HEADERDRAGDROP | LVS_EX_LABELTIP);
     for (int c = 0; c < ColCount; ++c) {
@@ -936,6 +955,98 @@ void MainWindow::OnContextMenu(int x, int y) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Thumbnails
+// ---------------------------------------------------------------------------------------------
+
+// Draws `source` letterboxed into a thumbnail-sized 32-bit tile, or the placeholder when null.
+HBITMAP MainWindow::MakeTile(HBITMAP source) const {
+    const int W = m_thumbW, H = m_thumbH;
+    const int pad = S(6);  // transparent gap between the picture and the file name
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = W + pad;
+    bi.bmiHeader.biHeight = -H;  // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP tile = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC dc = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (!tile) {
+        DeleteDC(dc);
+        return nullptr;
+    }
+    HGDIOBJ oldTile = SelectObject(dc, tile);
+
+    RECT all{0, 0, W, H};
+    HBRUSH bg = CreateSolidBrush(RGB(24, 25, 28));
+    FillRect(dc, &all, bg);
+    DeleteObject(bg);
+
+    BITMAP sb{};
+    if (source && GetObjectW(source, sizeof(sb), &sb) && sb.bmWidth > 0 && sb.bmHeight > 0) {
+        // Fit inside the tile, keeping the aspect ratio.
+        const int sw = sb.bmWidth, sh = std::abs(sb.bmHeight);
+        int dw = W, dh = MulDiv(sh, W, sw);
+        if (dh > H) {
+            dh = H;
+            dw = MulDiv(sw, H, sh);
+        }
+        HDC src = CreateCompatibleDC(dc);
+        HGDIOBJ oldSrc = SelectObject(src, source);
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        StretchBlt(dc, (W - dw) / 2, (H - dh) / 2, dw, dh, src, 0, 0, sw, sh, SRCCOPY);
+        SelectObject(src, oldSrc);
+        DeleteDC(src);
+    } else {
+        // Placeholder: green play triangle on the dark tile.
+        const int cx = W / 2, cy = H / 2, r = std::max(4, H / 4);
+        POINT tri[3] = {{cx - r * 2 / 3, cy - r}, {cx - r * 2 / 3, cy + r}, {cx + r, cy}};
+        HBRUSH green = CreateSolidBrush(kAccent);
+        HGDIOBJ oldBrush = SelectObject(dc, green);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        Polygon(dc, tri, 3);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(green);
+    }
+    GdiFlush();
+    // GDI leaves alpha at 0; make every pixel opaque so the 32-bit image list shows it.
+    auto* px = static_cast<uint32_t*>(bits);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) px[y * (W + pad) + x] |= 0xFF000000u;
+
+    SelectObject(dc, oldTile);
+    DeleteDC(dc);
+    return tile;
+}
+
+int MainWindow::AddThumbnail(HBITMAP source) {
+    if (!m_thumbs) return 0;
+    HBITMAP tile = MakeTile(source);
+    if (!tile) return 0;
+    int index = ImageList_Add(m_thumbs, tile, nullptr);
+    DeleteObject(tile);
+    return index < 0 ? 0 : index;
+}
+
+void MainWindow::CreateThumbnailList() {
+    // 16:9 tiles; the row height follows the image height.
+    m_thumbW = S(64);
+    m_thumbH = S(36);
+    HIMAGELIST list = ImageList_Create(m_thumbW + S(6), m_thumbH, ILC_COLOR32, 32, 32);
+    HIMAGELIST old = ListView_SetImageList(m_list, list, LVSIL_SMALL);
+    if (old) ImageList_Destroy(old);
+    m_thumbs = list;
+
+    AddThumbnail(nullptr);  // index 0: placeholder
+    for (auto& [id, item] : m_items) item.image = item.thumb ? AddThumbnail(item.thumb) : 0;
+    if (ListView_GetItemCount(m_list) > 0) RebuildList();
+}
+
+// ---------------------------------------------------------------------------------------------
 // Row actions ("Compressed file" column links)
 // ---------------------------------------------------------------------------------------------
 
@@ -1090,6 +1201,7 @@ void MainWindow::ScanLibrary() {
     for (auto it = m_items.begin(); it != m_items.end();) {
         if (!it->second.imported) {
             m_knownPaths.erase(ToLower(it->second.path));
+            if (it->second.thumb) DeleteObject(it->second.thumb);
             it = m_items.erase(it);
         } else {
             ++it;
@@ -1203,7 +1315,8 @@ void MainWindow::RebuildList() {
     for (const auto& [id, item] : m_items) {
         if (!filter.empty() && item.game != filter) continue;
         LVITEMW lv{};
-        lv.mask = LVIF_TEXT | LVIF_PARAM;
+        lv.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+        lv.iImage = item.image;
         lv.iItem = row;
         lv.pszText = LPSTR_TEXTCALLBACKW;
         lv.lParam = id;
@@ -1363,6 +1476,7 @@ void MainWindow::RemoveSelected() {
             continue;
         }
         m_knownPaths.erase(ToLower(it->second.path));
+        if (it->second.thumb) DeleteObject(it->second.thumb);
         m_items.erase(it);
         int row = FindRow(id);
         if (row >= 0) ListView_DeleteItem(m_list, row);

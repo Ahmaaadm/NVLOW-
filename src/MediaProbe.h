@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -23,10 +25,15 @@ struct MediaInfo {
 // Reads duration, resolution, frame rate and codec with Windows Media Foundation.
 MediaInfo ProbeMedia(const std::wstring& file);
 
-// Background queue that probes files one at a time.
+// The Windows Explorer thumbnail of a video (about `size` px on its long side), or nullptr.
+// The caller owns the returned bitmap. Needs COM initialised on the calling thread.
+HBITMAP LoadThumbnail(const std::wstring& file, int size);
+
+// Background queue that probes files one at a time (media info + thumbnail).
 class ProbeQueue {
 public:
-    using Callback = std::function<void(int id, const MediaInfo& info)>;
+    // `thumb` may be nullptr; ownership passes to the callback.
+    using Callback = std::function<void(int id, const MediaInfo& info, HBITMAP thumb)>;
 
     ~ProbeQueue() { Stop(); }
     void Start(Callback cb);

@@ -34,6 +34,18 @@ struct VideoItem {
     uint64_t outSize = 0;
     std::wstring outputPath;
     bool checked = false;
+    HBITMAP thumb = nullptr;  // Explorer thumbnail (owned), kept to rebuild the image list on DPI change
+    int image = 0;            // index in the list's image list (0 = placeholder)
+};
+
+// Background probe result posted to the UI thread; frees the thumbnail unless taken.
+struct ProbeResult {
+    MediaInfo info;
+    HBITMAP thumb = nullptr;
+    ProbeResult(const MediaInfo& i, HBITMAP t) : info(i), thumb(t) {}
+    ~ProbeResult() {
+        if (thumb) DeleteObject(thumb);
+    }
 };
 
 struct QueuedJob {
@@ -119,6 +131,11 @@ private:
     void SetHover(int row, int action);
     void CopyToClipboard(const std::wstring& text);
 
+    // Video thumbnails shown at the start of each row
+    void CreateThumbnailList();
+    int AddThumbnail(HBITMAP source);  // returns the image index (0 = placeholder on failure)
+    HBITMAP MakeTile(HBITMAP source) const;
+
     // Settings
     void LoadSettingsIntoControls();
     void ReadSettingsFromControls();
@@ -154,6 +171,8 @@ private:
     HFONT m_fontTitle = nullptr;
     HFONT m_fontSubtitle = nullptr;
     HFONT m_fontLinkHot = nullptr;  // underlined, for hovered row links
+    HIMAGELIST m_thumbs = nullptr;  // owned by the list view once set
+    int m_thumbW = 0, m_thumbH = 0;
     int m_hoverRow = -1;
     int m_hoverAction = -1;
 

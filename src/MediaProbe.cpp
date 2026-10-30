@@ -4,6 +4,7 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <shobjidl.h>
 #include <wrl/client.h>
 
 #include "Utils.h"
@@ -68,6 +69,15 @@ MediaInfo ProbeMedia(const std::wstring& file) {
     return info;
 }
 
+HBITMAP LoadThumbnail(const std::wstring& file, int size) {
+    ComPtr<IShellItemImageFactory> factory;
+    if (FAILED(SHCreateItemFromParsingName(file.c_str(), nullptr, IID_PPV_ARGS(&factory)))) return nullptr;
+    HBITMAP bmp = nullptr;
+    // THUMBNAILONLY: a real frame of the video, never the generic file-type icon.
+    if (FAILED(factory->GetImage(SIZE{size, size}, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &bmp))) return nullptr;
+    return bmp;
+}
+
 void ProbeQueue::Start(Callback cb) {
     m_callback = std::move(cb);
     m_thread = std::thread(&ProbeQueue::Loop, this);
@@ -92,7 +102,8 @@ void ProbeQueue::Stop() {
 }
 
 void ProbeQueue::Loop() {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Apartment-threaded: Shell thumbnail providers expect an STA.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     for (;;) {
         std::pair<int, std::wstring> job;
         {
@@ -103,7 +114,11 @@ void ProbeQueue::Loop() {
             m_queue.pop_front();
         }
         MediaInfo info = ProbeMedia(job.second);
-        if (m_callback) m_callback(job.first, info);
+        HBITMAP thumb = LoadThumbnail(job.second, 256);
+        if (m_callback)
+            m_callback(job.first, info, thumb);
+        else if (thumb)
+            DeleteObject(thumb);
     }
     CoUninitialize();
 }
